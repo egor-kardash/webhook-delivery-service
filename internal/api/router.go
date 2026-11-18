@@ -10,9 +10,7 @@ func NewRouter(log *slog.Logger, db Pinger) http.Handler {
 
 	handler := Chain(
 		router,
-		RequestID,
-		WithLogger(log),
-		AccessLog(),
+		RequestLog(log),
 		Recover(),
 		JSONError,
 	)
