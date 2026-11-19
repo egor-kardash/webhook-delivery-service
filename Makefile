@@ -3,17 +3,22 @@ export
 
 COMPOSE := docker compose
 BIN := ./bin/server
+SSLMODE := $(or $(POSTGRES_SSLMODE),disable)
 
 .PHONY: help check-env app-build app-run dev dev-down \
+		migrate-create migrate-up migrate-down migrate-action \
         db-up db-down db-reset tidy-check test lint fmt fmt-check check
 
 help:
 	@echo "app-build          build the binary"
 	@echo "app-run            build and run the app"
-	@echo "dev                db + app"
+	@echo "dev                db + migrations + app"
 	@echo "dev-down           stop containers, keep data"
 	@echo "db-up / db-down    postgres only"
 	@echo "db-reset           remove containers and volumes (asks first)"
+	@echo "migrate-create     make migrate-create seq=<name>"
+	@echo "migrate-up         apply all migrations"
+	@echo "migrate-down       roll back one migration (steps=N for more)"
 	@echo "tidy-check         check go.mod/go.sum are tidy (no changes made)"
 	@echo "test               unit tests with -race -shuffle -count=1"
 	@echo "lint               golangci-lint"
@@ -33,7 +38,7 @@ app-build:
 app-run: check-env app-build
 	@$(BIN)
 
-dev: db-up app-run
+dev: db-up migrate-up app-run
 
 dev-down:
 	@$(COMPOSE) down
@@ -53,6 +58,35 @@ db-reset:
 	else \
 		echo "Reset cancelled."; \
 	fi
+
+migrate-create:
+	@if [ -z "$(seq)" ]; then \
+		echo "seq parameter is required. Example: make migrate-create seq=init"; \
+		exit 1; \
+	fi; \
+	mkdir -p migrations; \
+	$(COMPOSE) run --rm --no-deps --user $(shell id -u):$(shell id -g) migrate \
+		create \
+		-ext sql \
+		-dir /migrations \
+		-seq "$(seq)"
+
+migrate-up:
+	@$(MAKE) migrate-action action=up
+
+migrate-down:
+	@$(MAKE) migrate-action action=down steps=$(or $(steps),1)
+
+migrate-action: check-env
+	@if [ -z "$(action)" ]; then \
+		echo "action parameter is required. Example: make migrate-action action=up"; \
+		exit 1; \
+	fi; \
+	$(COMPOSE) run --rm migrate \
+		-path /migrations \
+		-database "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@db:5432/$(POSTGRES_DB)?sslmode=$(SSLMODE)" \
+		"$(action)" $(if $(steps),$(steps))
+
 
 tidy-check:
 	@go mod tidy -diff
