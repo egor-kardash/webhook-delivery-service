@@ -4,17 +4,21 @@
 
 ## Статус
 
-Скелет. Реализованы только health/ready и каркас HTTP-слоя (request id, access log, JSON-ошибки). Бизнес-эндпоинтов пока нет.
+Скелет. Реализованы только health/ready и каркас HTTP-слоя (request id, access log, JSON-ошибки) и схема БД с миграциями. Бизнес-эндпоинтов пока нет.
+
+## Требования
+
+- Go 1.27+
+- Docker с compose (Postgres и golang-migrate запускаются контейнерами)
+- golangci-lint - для `make lint` и `make check`
 
 ## Быстрый старт
-
-Нужны Go 1.27+, Docker с compose и три обязательные переменные: `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`.
 
 1. Создать `.env` и заполнить переменные `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`:
 
        cp .env.example .env
 
-2. Поднять Postgres и приложение:
+2. Поднять Postgres, накатить миграции и запустить приложение:
 
        make dev
 
@@ -52,6 +56,32 @@
 
 Пустая необязательная переменная = применяется значение по умолчанию. Пустая обязательная - ошибка при старте.
 
+## Схема БД
+
+Схема `webhook`, три таблицы:
+
+- `subscriptions` - подписки: `target_url`, `secret_key`, `event_types text[]`, `active`;
+- `events` - события: `event_type`, `payload` (JSON-объект), `idempotency_key`. `idempotency_key` уникален: повторная публикация с тем же ключом не создает событие;
+- `deliveries` - доставки: `status`, `attempts`, `next_attempt_at`, `locked_until`, `last_status_code`, `last_error`. Пара `(event_id, subscription_id)` уникальна: одна доставка на событие и подписку.
+
+Индексы рассчитаны на три запроса: GIN по `event_types` (только активные
+подписки), частичный по `next_attempt_at` для `pending` (claim) и частичный по
+`locked_until` для `in_progress` (подхват после падения воркера). `next_attempt_at`
+и `locked_until` считает БД через `now()`.
+
+Внешние ключи - `ON DELETE RESTRICT`: история доставок не теряется.
+
+## Миграции
+
+golang-migrate, файлы в `migrations/`, применяются контейнером `migrate`.
+
+    make migrate-create seq=<name>   # новая пара up/down
+    make migrate-up                  # накатить все
+    make migrate-down                # откатить один шаг
+    make migrate-down steps=2        # откатить два
+
+- `migrate-down` полностью удаляет схему `webhook` вместе с данными.
+
 ## Эндпоинты
 
 | Метод | Путь      | Ответ                                                        |
@@ -59,9 +89,8 @@
 | GET   | /healthz  | 200 `{"status":"ok"}`                                        |
 | GET   | /readyz   | 200 `{"status":"ready"}` / 503 `{"error":{"code":"database_unavailable"}}` |
 
-Ошибки - единый envelope `{"error":{"code":"not_found","message":"route not found","fields":{}}}`.
-Неизвестный маршрут → JSON 404, неподдерживаемый метод → JSON 405 + `Allow`.
+Ошибки - единый envelope `{"error":{"code":"...","message":"..."}}`. `fields` появляется только при ошибках валидации. Неизвестный маршрут → JSON 404, неподдерживаемый метод → JSON 405 + `Allow`.
 
 ## Команды
 
-`make help` - полный список. Основное: `dev`, `dev-down`, `db-reset`, `test`, `check`.
+`make help` - полный список. Основное: `dev`, `dev-down`, `db-up`, `db-reset`, `migrate-up`, `migrate-down`, `test`, `check`.
