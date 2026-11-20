@@ -5,18 +5,19 @@ import (
 	"net/http"
 )
 
-func NewRouter(log *slog.Logger, db Pinger) http.Handler {
-	router := http.NewServeMux()
+type Registrar interface {
+	RegisterRoutes(*http.ServeMux)
+}
 
-	handler := Chain(
-		router,
-		RequestLog(log),
-		Recover(),
-		JSONError,
-	)
+func NewRouter(log *slog.Logger, db Pinger, regs ...Registrar) http.Handler {
+	mux := http.NewServeMux()
 
-	router.HandleFunc("GET /healthz", healthz)
-	router.HandleFunc("GET /readyz", readyz(db))
+	mux.HandleFunc("GET /healthz", healthz)
+	mux.HandleFunc("GET /readyz", readyz(db))
 
-	return handler
+	for _, r := range regs {
+		r.RegisterRoutes(mux)
+	}
+
+	return Chain(mux, RequestLog(log), Recover(), JSONError)
 }

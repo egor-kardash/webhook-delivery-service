@@ -97,7 +97,7 @@ func Recover() Middleware {
 					panic(http.ErrAbortHandler)
 				}
 
-				WriteError(r.Context(), ww, http.StatusInternalServerError, "internal_error", "internal server error")
+				WriteError(r.Context(), ww, http.StatusInternalServerError, codeInternalError, "internal server error")
 			}()
 
 			next.ServeHTTP(ww, r)
@@ -120,9 +120,9 @@ func JSONError(next http.Handler) http.Handler {
 
 		switch iw.status {
 		case http.StatusNotFound:
-			WriteError(r.Context(), w, http.StatusNotFound, "not_found", "route not found")
+			WriteError(r.Context(), w, http.StatusNotFound, codeNotFound, "route not found")
 		case http.StatusMethodNotAllowed:
-			WriteError(r.Context(), w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			WriteError(r.Context(), w, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed")
 		}
 	})
 }
