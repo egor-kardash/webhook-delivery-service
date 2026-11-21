@@ -34,7 +34,11 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	subService := service.NewSubscriptionService(subStore)
 	subHandler := api.NewSubscriptionHandler(subService)
 
-	router := api.NewRouter(log, pool, subHandler)
+	eventStore := store.NewEventStore(pool)
+	eventService := service.NewEventService(eventStore)
+	eventHandler := api.NewEventHandler(eventService)
+
+	router := api.NewRouter(log, pool, subHandler, eventHandler)
 
 	server := api.NewServer(
 		api.ServerOptions{

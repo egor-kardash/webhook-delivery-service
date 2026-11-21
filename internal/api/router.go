@@ -3,7 +3,10 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"time"
 )
+
+const dbTimeout = 3 * time.Second
 
 type Registrar interface {
 	RegisterRoutes(*http.ServeMux)
