@@ -5,9 +5,16 @@ COMPOSE := docker compose
 BIN := ./bin/server
 SSLMODE := $(or $(POSTGRES_SSLMODE),disable)
 
-.PHONY: help check-env app-build app-run dev dev-down \
+TEST_POSTGRES_HOST ?= localhost
+TEST_POSTGRES_PORT ?= $(or $(POSTGRES_PORT),5433)
+TEST_POSTGRES_USER ?= $(POSTGRES_USER)
+TEST_POSTGRES_PASSWORD ?= $(POSTGRES_PASSWORD)
+TEST_POSTGRES_DB ?= $(POSTGRES_DB)_test
+TEST_POSTGRES_SSLMODE ?= $(SSLMODE)
+
+.PHONY: help check-env check-test-env app-build app-run dev dev-down \
 		migrate-create migrate-up migrate-down migrate-action \
-        db-up db-down db-reset tidy-check test lint fmt fmt-check check
+        db-up db-down db-reset tidy-check test test-integration lint fmt fmt-check check
 
 help:
 	@echo "app-build          build the binary"
@@ -21,6 +28,7 @@ help:
 	@echo "migrate-down       roll back one migration (steps=N for more)"
 	@echo "tidy-check         check go.mod/go.sum are tidy (no changes made)"
 	@echo "test               unit tests with -race -shuffle -count=1"
+	@echo "test-integration   integration tests against POSTGRES_DB_test"
 	@echo "lint               golangci-lint"
 	@echo "fmt                format code (gofumpt + import grouping + golines)"
 	@echo "fmt-check          check formatting (gofumpt + import grouping + golines)"
@@ -31,6 +39,15 @@ check-env:
 	@test -n "$(POSTGRES_USER)" || { echo "error: POSTGRES_USER is empty in .env" >&2; exit 1; }
 	@test -n "$(POSTGRES_PASSWORD)" || { echo "error: POSTGRES_PASSWORD is empty in .env" >&2; exit 1; }
 	@test -n "$(POSTGRES_DB)" || { echo "error: POSTGRES_DB is empty in .env" >&2; exit 1; }
+
+check-test-env:
+	@test -n "$(TEST_POSTGRES_DB)" || { echo "error: TEST_POSTGRES_DB is empty" >&2; exit 1; }
+	@case "$(TEST_POSTGRES_DB)" in \
+		*_test) ;; \
+		*) echo "error: TEST_POSTGRES_DB = \"$(TEST_POSTGRES_DB)\": name must end with _test" >&2; exit 1 ;; \
+	esac
+	@test -n "$(TEST_POSTGRES_USER)" || { echo "error: TEST_POSTGRES_USER is empty" >&2; exit 1; }
+	@test -n "$(TEST_POSTGRES_PASSWORD)" || { echo "error: TEST_POSTGRES_PASSWORD is empty" >&2; exit 1; }
 
 app-build:
 	@go build -o $(BIN) ./cmd/server
@@ -87,12 +104,21 @@ migrate-action: check-env
 		-database "postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@db:5432/$(POSTGRES_DB)?sslmode=$(SSLMODE)" \
 		"$(action)" $(if $(steps),$(steps))
 
-
 tidy-check:
 	@go mod tidy -diff
 
 test:
 	@go test -race -shuffle=on -count=1 -timeout=2m ./...
+
+test-integration: check-env check-test-env db-up
+	@$(COMPOSE) exec -T db psql -U $(TEST_POSTGRES_USER) -d postgres -tAc \
+		"SELECT 1 FROM pg_database WHERE datname = '$(TEST_POSTGRES_DB)'" | grep -q 1 || \
+		$(COMPOSE) exec -T db createdb -U $(TEST_POSTGRES_USER) $(TEST_POSTGRES_DB)
+	@$(COMPOSE) run --rm migrate \
+		-path /migrations \
+		-database "postgres://$(TEST_POSTGRES_USER):$(TEST_POSTGRES_PASSWORD)@db:5432/$(TEST_POSTGRES_DB)?sslmode=$(TEST_POSTGRES_SSLMODE)" \
+		up
+	@go test -race -shuffle=on -count=1 -p 1 -tags=integration -timeout=5m ./...
 
 lint:
 	@golangci-lint run
