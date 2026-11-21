@@ -10,7 +10,7 @@ func WriteJSON(ctx context.Context, w http.ResponseWriter, status int, payload a
 	body, err := json.Marshal(payload)
 	if err != nil {
 		LoggerFrom(ctx).Error("encode json response", "error", err)
-		WriteError(ctx, w, http.StatusInternalServerError, "internal_error", "internal server error")
+		WriteError(ctx, w, http.StatusInternalServerError, codeInternalError, "internal server error")
 		return
 	}
 

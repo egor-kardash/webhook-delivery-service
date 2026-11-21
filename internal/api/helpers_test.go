@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/egor-kardash/webhook-delivery-service/internal/api"
@@ -41,7 +42,7 @@ func requireStatus(t *testing.T, rr *httptest.ResponseRecorder, want int) {
 	}
 }
 
-func requireError(t *testing.T, rr *httptest.ResponseRecorder, status int, code string) {
+func requireError(t *testing.T, rr *httptest.ResponseRecorder, status int, code string) errorEnvelope {
 	t.Helper()
 
 	requireStatus(t, rr, status)
@@ -50,6 +51,8 @@ func requireError(t *testing.T, rr *httptest.ResponseRecorder, status int, code 
 	if body.Error.Code != code {
 		t.Errorf("error.code = %q, want %q", body.Error.Code, code)
 	}
+
+	return body
 }
 
 func decodeJSONBody[T any](t *testing.T, rr *httptest.ResponseRecorder) T {
@@ -67,6 +70,24 @@ func decodeJSONBody[T any](t *testing.T, rr *httptest.ResponseRecorder) T {
 	return v
 }
 
-func newTestRouter(p api.Pinger) http.Handler {
-	return api.NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), p)
+func newJSONPost(t *testing.T, path, body string) *http.Request {
+	t.Helper()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	return req
+}
+
+func serve(t *testing.T, handler http.Handler, req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	return rr
+}
+
+func newTestRouter(p api.Pinger, regs ...api.Registrar) http.Handler {
+	return api.NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), p, regs...)
 }

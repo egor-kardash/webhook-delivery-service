@@ -31,7 +31,7 @@ func readyz(db Pinger) http.HandlerFunc {
 				r.Context(),
 				w,
 				http.StatusServiceUnavailable,
-				"database_unavailable",
+				codeDatabaseUnavailable,
 				"database is not reachable",
 			)
 			return

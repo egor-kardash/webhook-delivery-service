@@ -13,6 +13,7 @@ import (
 
 	"github.com/egor-kardash/webhook-delivery-service/internal/api"
 	"github.com/egor-kardash/webhook-delivery-service/internal/config"
+	"github.com/egor-kardash/webhook-delivery-service/internal/service"
 	"github.com/egor-kardash/webhook-delivery-service/internal/store"
 )
 
@@ -29,7 +30,11 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 		return nil, fmt.Errorf("init postgres: %w", err)
 	}
 
-	router := api.NewRouter(log, pool)
+	subStore := store.NewSubscriptionStore(pool)
+	subService := service.NewSubscriptionService(subStore)
+	subHandler := api.NewSubscriptionHandler(subService)
+
+	router := api.NewRouter(log, pool, subHandler)
 
 	server := api.NewServer(
 		api.ServerOptions{
