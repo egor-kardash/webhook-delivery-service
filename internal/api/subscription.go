@@ -10,8 +10,6 @@ import (
 	"github.com/egor-kardash/webhook-delivery-service/internal/service"
 )
 
-const dbTimeout = 3 * time.Second
-
 type SubscriptionService interface {
 	Create(ctx context.Context, in service.CreateSubscriptionInput) (*domain.Subscription, error)
 }

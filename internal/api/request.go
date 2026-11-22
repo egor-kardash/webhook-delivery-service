@@ -17,6 +17,19 @@ var (
 	ErrUnsupportedMediaType = errors.New("unsupported media type")
 )
 
+func requireHeader(w http.ResponseWriter, r *http.Request, header, field string) (string, bool) {
+	value := strings.TrimSpace(r.Header.Get(header))
+	if value != "" {
+		return value, true
+	}
+
+	writeValidationError(r.Context(), w, map[string]string{
+		field: "header is required",
+	})
+
+	return "", false
+}
+
 func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil ||

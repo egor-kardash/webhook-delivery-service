@@ -32,11 +32,11 @@ type errorEnvelope struct {
 }
 
 func writeServiceError(ctx context.Context, w http.ResponseWriter, err error) {
-	var ve *domain.ValidationError
+	var valErr *domain.ValidationError
 
 	switch {
-	case errors.As(err, &ve):
-		WriteErrorFields(ctx, w, http.StatusBadRequest, codeValidationFailed, "request validation failed", ve.Fields)
+	case errors.As(err, &valErr):
+		writeValidationError(ctx, w, valErr.Fields)
 	case errors.Is(err, context.Canceled):
 		LoggerFrom(ctx).Debug("request canceled", "error", err)
 		WriteError(ctx, w, http.StatusServiceUnavailable, codeServiceUnavailable, "request canceled")
@@ -47,6 +47,10 @@ func writeServiceError(ctx context.Context, w http.ResponseWriter, err error) {
 		LoggerFrom(ctx).Error("request failed", "error", err)
 		WriteError(ctx, w, http.StatusInternalServerError, codeInternalError, "internal server error")
 	}
+}
+
+func writeValidationError(ctx context.Context, w http.ResponseWriter, fields map[string]string) {
+	WriteErrorFields(ctx, w, http.StatusBadRequest, codeValidationFailed, "request validation failed", fields)
 }
 
 func writeDecodeError(ctx context.Context, w http.ResponseWriter, err error) {
