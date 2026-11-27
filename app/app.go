@@ -12,15 +12,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/egor-kardash/webhook-delivery-service/internal/api"
+	"github.com/egor-kardash/webhook-delivery-service/internal/client"
 	"github.com/egor-kardash/webhook-delivery-service/internal/config"
 	"github.com/egor-kardash/webhook-delivery-service/internal/service"
 	"github.com/egor-kardash/webhook-delivery-service/internal/store"
+	"github.com/egor-kardash/webhook-delivery-service/internal/worker"
 )
 
 type App struct {
 	pool            *pgxpool.Pool
 	log             *slog.Logger
 	server          *http.Server
+	deliveryWorker  *worker.Worker
 	shutdownTimeout time.Duration
 }
 
@@ -38,7 +41,34 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	eventService := service.NewEventService(eventStore)
 	eventHandler := api.NewEventHandler(eventService)
 
-	router := api.NewRouter(log, pool, subHandler, eventHandler)
+	webhookClient, err := client.New(client.Config{
+		Timeout: cfg.Delivery.HTTPTimeout,
+	})
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("init webhook client: %w", err)
+	}
+
+	deliveryStore, err := store.NewDeliveryStore(pool, cfg.Delivery.Lease)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("init delivery store: %w", err)
+	}
+
+	deliveryService := service.NewDeliveryService(deliveryStore, webhookClient)
+
+	deliveryHandler := api.NewDeliveryHandler(deliveryService)
+
+	deliveryWorker, err := worker.New(deliveryService, worker.Config{
+		PollInterval: cfg.Delivery.PollInterval,
+		MaxPerTick:   cfg.Delivery.MaxPerTick,
+	}, log)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("init delivery worker: %w", err)
+	}
+
+	router := api.NewRouter(log, pool, subHandler, eventHandler, deliveryHandler)
 
 	server := api.NewServer(
 		api.ServerOptions{
@@ -56,6 +86,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 		pool:            pool,
 		log:             log,
 		server:          server,
+		deliveryWorker:  deliveryWorker,
 		shutdownTimeout: cfg.HTTPServer.ShutdownTimeout,
 	}, nil
 }
@@ -69,30 +100,53 @@ func (a *App) Run(ctx context.Context) error {
 	a.log.Info("http server listening", "addr", ln.Addr().String())
 
 	serveErr := make(chan error, 1)
-
 	go func() {
 		serveErr <- a.server.Serve(ln)
 	}()
 
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	workerDone := make(chan struct{})
+
+	go func() {
+		defer close(workerDone)
+
+		if err := a.deliveryWorker.Run(workerCtx); err != nil {
+			a.log.Error("delivery worker stopped", "error", err)
+		}
+	}()
+
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
-		defer cancel()
+		shutdownErr := a.shutdownHTTPServer()
 
-		if err := a.server.Shutdown(shutdownCtx); err != nil {
-			_ = a.server.Close()
-			return fmt.Errorf("shutdown http server: %w", err)
-		}
+		stopWorker()
+		<-workerDone
 
-		a.log.Info("http server stopped")
-		return nil
+		return shutdownErr
 
 	case err := <-serveErr:
+		stopWorker()
+		<-workerDone
+
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return fmt.Errorf("serve http: %w", err)
 	}
+}
+
+func (a *App) shutdownHTTPServer() error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
+	defer cancel()
+
+	if err := a.server.Shutdown(shutdownCtx); err != nil {
+		_ = a.server.Close()
+		return fmt.Errorf("shutdown http server: %w", err)
+	}
+
+	a.log.Info("http server stopped")
+
+	return nil
 }
 
 func (a *App) Close() error {

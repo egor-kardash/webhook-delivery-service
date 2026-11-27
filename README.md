@@ -4,7 +4,7 @@
 
 ## Статус
 
-Скелет. Реализованы health/ready, каркас HTTP-слоя (request id, access log, JSON-ошибки), схема БД с миграциями, создание подписок `POST /subscriptions` и публикация событий `POST /events`. Worker доставки, `GET /deliveries/{id}` и ручной retry пока нет.
+Скелет. Реализованы health/ready, каркас HTTP-слоя (request id, access log, JSON-ошибки), схема БД с миграциями, создание подписок `POST /subscriptions`, публикация событий `POST /events` и worker доставки. `GET /deliveries/{id}` и ручной retry пока нет.
 
 ## Требования
 
@@ -66,10 +66,16 @@
 | HTTP_WRITE_TIMEOUT        | нет         | 10s          |
 | HTTP_IDLE_TIMEOUT         | нет         | 60s          |
 | HTTP_SHUTDOWN_TIMEOUT     | нет         | 10s          |
+| DELIVERY_POLL_INTERVAL    | нет         | 1s           |
+| DELIVERY_MAX_PER_TICK     | нет         | 100          |
+| DELIVERY_HTTP_TIMEOUT     | нет         | 5s           |
+| DELIVERY_LEASE            | нет         | 30s          |
 | LOG_LEVEL                 | нет         | info         |
 | LOG_FORMAT                | нет         | text         |
 
 Пустая необязательная переменная = применяется значение по умолчанию. Пустая обязательная - ошибка при старте.
+
+`DELIVERY_LEASE` должен быть больше `DELIVERY_HTTP_TIMEOUT`: иначе lease истечёт, пока HTTP-запрос ещё выполняется, и доставку может забрать другой воркер.
 
 ## Схема БД
 

@@ -37,6 +37,8 @@ func writeServiceError(ctx context.Context, w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &valErr):
 		writeValidationError(ctx, w, valErr.Fields)
+	case errors.Is(err, domain.ErrDeliveryNotFound):
+		WriteError(ctx, w, http.StatusNotFound, codeNotFound, "delivery not found")
 	case errors.Is(err, context.Canceled):
 		LoggerFrom(ctx).Debug("request canceled", "error", err)
 		WriteError(ctx, w, http.StatusServiceUnavailable, codeServiceUnavailable, "request canceled")
