@@ -50,7 +50,7 @@ func (h *DeliveryHandler) GetDelivery(w http.ResponseWriter, r *http.Request) {
 
 	delivery, err := h.svc.GetDelivery(ctx, id)
 	if err != nil {
-		writeServiceError(ctx, w, err)
+		writeServiceError(r.Context(), w, err)
 		return
 	}
 
