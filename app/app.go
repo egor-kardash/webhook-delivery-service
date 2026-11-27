@@ -41,7 +41,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 	eventService := service.NewEventService(eventStore)
 	eventHandler := api.NewEventHandler(eventService)
 
-	webhookClient, err := client.New(client.Config{
+	webhookClient, err := client.New(client.Options{
 		Timeout: cfg.Delivery.HTTPTimeout,
 	})
 	if err != nil {
@@ -59,7 +59,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 
 	deliveryHandler := api.NewDeliveryHandler(deliveryService)
 
-	deliveryWorker, err := worker.New(deliveryService, worker.Config{
+	deliveryWorker, err := worker.New(deliveryService, worker.Options{
 		PollInterval: cfg.Delivery.PollInterval,
 		MaxPerTick:   cfg.Delivery.MaxPerTick,
 	}, log)

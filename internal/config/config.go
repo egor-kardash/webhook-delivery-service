@@ -177,7 +177,7 @@ func Load() (*Config, error) {
 		},
 		Delivery: Delivery{
 			PollInterval: envDuration("DELIVERY_POLL_INTERVAL", time.Second, &errs),
-			MaxPerTick:   envInt("DELIVERY_MAX_PER_TICK", 100, &errs),
+			MaxPerTick:   envInt("DELIVERY_MAX_PER_TICK", 5, &errs),
 			HTTPTimeout:  envDuration("DELIVERY_HTTP_TIMEOUT", 5*time.Second, &errs),
 			Lease:        envDuration("DELIVERY_LEASE", 30*time.Second, &errs),
 		},
