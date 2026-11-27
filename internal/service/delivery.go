@@ -104,6 +104,8 @@ func evaluateAttempt(job domain.DeliveryJob, statusCode int, sendErr error) doma
 	switch {
 	case statusCode >= 200 && statusCode < 300:
 		result.Status = domain.DeliveryDelivered
+	case statusCode == 408 || statusCode == 429:
+		result.Status = domain.DeliveryPending
 	case statusCode >= 500 && statusCode <= 599:
 		result.Status = domain.DeliveryPending
 	default:

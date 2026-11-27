@@ -11,7 +11,7 @@ type Processor interface {
 	ProcessDue(ctx context.Context, maxPerTick int) error
 }
 
-type Config struct {
+type Options struct {
 	PollInterval time.Duration
 	MaxPerTick   int
 }
@@ -23,12 +23,12 @@ type Worker struct {
 	log        *slog.Logger
 }
 
-func New(processor Processor, cfg Config, log *slog.Logger) (*Worker, error) {
-	if cfg.PollInterval <= 0 {
-		return nil, fmt.Errorf("poll interval = %s, must be greater than 0", cfg.PollInterval)
+func New(processor Processor, opts Options, log *slog.Logger) (*Worker, error) {
+	if opts.PollInterval <= 0 {
+		return nil, fmt.Errorf("poll interval = %s, must be greater than 0", opts.PollInterval)
 	}
-	if cfg.MaxPerTick <= 0 {
-		return nil, fmt.Errorf("max per tick = %d, must be greater than 0", cfg.MaxPerTick)
+	if opts.MaxPerTick <= 0 {
+		return nil, fmt.Errorf("max per tick = %d, must be greater than 0", opts.MaxPerTick)
 	}
 	if log == nil {
 		log = slog.Default()
@@ -36,8 +36,8 @@ func New(processor Processor, cfg Config, log *slog.Logger) (*Worker, error) {
 
 	return &Worker{
 		processor:  processor,
-		interval:   cfg.PollInterval,
-		maxPerTick: cfg.MaxPerTick,
+		interval:   opts.PollInterval,
+		maxPerTick: opts.MaxPerTick,
 		log:        log,
 	}, nil
 }

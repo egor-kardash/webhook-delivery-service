@@ -18,7 +18,7 @@ const (
 	maxResponseBodyLen = 64 << 10
 )
 
-type Config struct {
+type Options struct {
 	Timeout   time.Duration
 	UserAgent string
 }
@@ -28,18 +28,18 @@ type Client struct {
 	userAgent  string
 }
 
-func New(cfg Config) (*Client, error) {
-	if cfg.Timeout <= 0 {
-		return nil, fmt.Errorf("http timeout = %s, must be greater than 0", cfg.Timeout)
+func New(opts Options) (*Client, error) {
+	if opts.Timeout <= 0 {
+		return nil, fmt.Errorf("http timeout = %s, must be greater than 0", opts.Timeout)
 	}
 
-	userAgent := cfg.UserAgent
+	userAgent := opts.UserAgent
 	if userAgent == "" {
 		userAgent = defaultUserAgent
 	}
 
 	httpClient := &http.Client{
-		Timeout: cfg.Timeout,
+		Timeout: opts.Timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
