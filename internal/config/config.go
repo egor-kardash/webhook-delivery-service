@@ -13,6 +13,7 @@ import (
 type Config struct {
 	HTTPServer HTTPServer
 	Database   Database
+	Delivery   Delivery
 	Log        Log
 }
 
@@ -108,6 +109,33 @@ func (db Database) DSN() string {
 	return u.String()
 }
 
+type Delivery struct {
+	PollInterval time.Duration
+	MaxPerTick   int
+	HTTPTimeout  time.Duration
+	Lease        time.Duration
+}
+
+func (d Delivery) Validate() error {
+	if d.PollInterval <= 0 {
+		return errors.New("delivery.poll_interval: must be greater than 0")
+	}
+	if d.MaxPerTick <= 0 {
+		return errors.New("delivery.max_per_tick: must be greater than 0")
+	}
+	if d.HTTPTimeout <= 0 {
+		return errors.New("delivery.http_timeout: must be greater than 0")
+	}
+	if d.Lease <= 0 {
+		return errors.New("delivery.lease: must be greater than 0")
+	}
+	if d.Lease <= d.HTTPTimeout {
+		return errors.New("delivery.lease: must be greater than delivery.http_timeout")
+	}
+
+	return nil
+}
+
 type Log struct {
 	Level  string
 	Format string
@@ -118,6 +146,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.Database.Validate(); err != nil {
+		return err
+	}
+	if err := c.Delivery.Validate(); err != nil {
 		return err
 	}
 
@@ -143,6 +174,12 @@ func Load() (*Config, error) {
 			Host:     envString("POSTGRES_HOST", "localhost"),
 			Port:     envInt("POSTGRES_PORT", 5433, &errs),
 			SSLMode:  envString("POSTGRES_SSLMODE", "disable"),
+		},
+		Delivery: Delivery{
+			PollInterval: envDuration("DELIVERY_POLL_INTERVAL", time.Second, &errs),
+			MaxPerTick:   envInt("DELIVERY_MAX_PER_TICK", 5, &errs),
+			HTTPTimeout:  envDuration("DELIVERY_HTTP_TIMEOUT", 5*time.Second, &errs),
+			Lease:        envDuration("DELIVERY_LEASE", 30*time.Second, &errs),
 		},
 		Log: Log{
 			Level:  envString("LOG_LEVEL", "info"),
