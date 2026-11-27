@@ -1,10 +1,10 @@
 # Webhook Delivery Service
 
-Сервис доставки webhook-событий: принимает событие, находит активные подписки, ставит доставки в очередь и отправляет HTTP POST с HMAC-подписью, повторами и журналом статусов. Гарантия - at-least-once.
+Сервис доставки webhook-событий: принимает событие, находит активные подписки, ставит доставки в очередь и отправляет HTTP POST. Гарантия - at-least-once. HMAC-подпись, retry/backoff и ручной retry - следующие шаги.
 
 ## Статус
 
-Скелет. Реализованы health/ready, каркас HTTP-слоя (request id, access log, JSON-ошибки), схема БД с миграциями, создание подписок `POST /subscriptions`, публикация событий `POST /events` и worker доставки. `GET /deliveries/{id}` и ручной retry пока нет.
+В разработке. Реализованы health/ready, каркас HTTP-слоя (request id, access log, JSON-ошибки), схема БД с миграциями, создание подписок `POST /subscriptions`, публикация событий `POST /events`, worker доставки и `GET /deliveries/{id}`. Пока нет HMAC-подписи, retry/backoff, dead-letter и ручного retry.
 
 ## Требования
 
@@ -67,7 +67,7 @@
 | HTTP_IDLE_TIMEOUT         | нет         | 60s          |
 | HTTP_SHUTDOWN_TIMEOUT     | нет         | 10s          |
 | DELIVERY_POLL_INTERVAL    | нет         | 1s           |
-| DELIVERY_MAX_PER_TICK     | нет         | 100          |
+| DELIVERY_MAX_PER_TICK     | нет         | 5            |
 | DELIVERY_HTTP_TIMEOUT     | нет         | 5s           |
 | DELIVERY_LEASE            | нет         | 30s          |
 | LOG_LEVEL                 | нет         | info         |
@@ -75,7 +75,18 @@
 
 Пустая необязательная переменная = применяется значение по умолчанию. Пустая обязательная - ошибка при старте.
 
-`DELIVERY_LEASE` должен быть больше `DELIVERY_HTTP_TIMEOUT`: иначе lease истечёт, пока HTTP-запрос ещё выполняется, и доставку может забрать другой воркер.
+`DELIVERY_LEASE` должен быть больше `DELIVERY_HTTP_TIMEOUT`: иначе lease истечет, пока HTTP-запрос еще выполняется, и доставку может забрать другой воркер.
+
+`DELIVERY_MAX_PER_TICK` - сколько доставок worker обрабатывает за один тик. Обработка последовательная; конкурентности пока нет.
+
+## Worker доставки
+
+Раз в `DELIVERY_POLL_INTERVAL` worker берет доставки в статусе `pending` (`FOR UPDATE SKIP LOCKED` + lease `DELIVERY_LEASE`) и обрабатывает до `DELIVERY_MAX_PER_TICK` штук последовательно.
+
+- `2xx` - `delivered`;
+- `4xx`, кроме `408`/`429` - `failed`;
+- `408`/`429`, `5xx`, сеть/таймаут - `pending` (повтор на следующем тике);
+- backoff, dead-letter и ручной retry пока не реализованы.
 
 ## Схема БД
 
@@ -110,6 +121,7 @@ golang-migrate, файлы в `migrations/`, применяются контей
 | GET   | /readyz          | 200 `{"status":"ready"}` / 503 `{"error":{"code":"database_unavailable"}}`               |
 | POST  | /subscriptions   | 201 + `Location`, тело с `secret_key`; ошибки 400/413/415/500/503                        |
 | POST  | /events          | 202/200, `event_id` и `deliveries` (количество); ошибки 400/413/415/500/503               |
+| GET   | /deliveries/{id} | 200 с полями доставки; 400/404/500/503                                                    |
 
 Ошибки - единый envelope `{"error":{"code":"...","message":"..."}}`. `fields` появляется только при ошибках валидации. Неизвестный маршрут → JSON 404, неподдерживаемый метод → JSON 405 + `Allow`.
 
@@ -199,6 +211,32 @@ golang-migrate, файлы в `migrations/`, применяются контей
 | 415    | `unsupported_media_type` | нет `Content-Type: application/json` (или `*+json`)                 |
 | 500    | `internal_error`         | внутренняя ошибка, включая ошибки БД, не классифицированные как временные |
 | 503    | `service_unavailable`    | таймаут или отмена запроса к зависимости                            |
+
+### GET /deliveries/{id}
+
+Отладочный endpoint, авторизации нет. `POST /events` возвращает только количество доставок. ID можно взять из БД/логов.
+
+Ответ `200`:
+
+    {
+      "id": 1,
+      "event_id": 42,
+      "subscription_id": 7,
+      "status": "pending",
+      "attempts": 0,
+      "next_attempt_at": "2026-11-27T12:00:00Z",
+      "last_status_code": 0,
+      "last_error": "",
+      "created_at": "2026-11-27T11:59:00Z",
+      "updated_at": "2026-11-27T11:59:00Z"
+    }
+
+- `status` - `pending`, `in_progress`, `delivered`, `failed` или `dead`;
+- `attempts` - сколько попыток уже записано;
+- `last_status_code = 0` и пустой `last_error` означают, что ответа от получателя еще не было;
+- `next_attempt_at` имеет смысл для `pending`, для терминальных статусов это не расписание.
+
+Ошибки: `400 validation_failed` для невалидного `id`, `404 not_found` для отсутствующей доставки, `500 internal_error`, `503 service_unavailable`.
 
 ## Команды
 
