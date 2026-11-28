@@ -1,10 +1,10 @@
 # Webhook Delivery Service
 
-Сервис доставки webhook-событий: принимает событие, находит активные подписки, ставит доставки в очередь и отправляет HTTP POST. Гарантия - at-least-once. HMAC-подпись, retry/backoff и ручной retry - следующие шаги.
+Сервис доставки webhook-событий: принимает событие, находит активные подписки, ставит доставки в очередь и отправляет HTTP POST. Гарантия - at-least-once. HMAC-подписи пока нет.
 
 ## Статус
 
-В разработке. Реализованы health/ready, каркас HTTP-слоя (request id, access log, JSON-ошибки), схема БД с миграциями, создание подписок `POST /subscriptions`, публикация событий `POST /events`, worker доставки и `GET /deliveries/{id}`. Пока нет HMAC-подписи, retry/backoff, dead-letter и ручного retry.
+В разработке. Реализованы health/ready, каркас HTTP-слоя (request id, access log, JSON-ошибки), схема БД с миграциями, создание подписок `POST /subscriptions`, публикация событий `POST /events`, worker доставки с retry/backoff, `dead` и ручной retry, а также `GET /deliveries/{id}`. Пока нет HMAC-подписи.
 
 ## Требования
 
@@ -70,6 +70,9 @@
 | DELIVERY_MAX_PER_TICK     | нет         | 5            |
 | DELIVERY_HTTP_TIMEOUT     | нет         | 5s           |
 | DELIVERY_LEASE            | нет         | 30s          |
+| DELIVERY_MAX_ATTEMPTS     | нет         | 5            |
+| DELIVERY_RETRY_BASE_DELAY | нет         | 1s           |
+| DELIVERY_RETRY_MAX_DELAY  | нет         | 1m           |
 | LOG_LEVEL                 | нет         | info         |
 | LOG_FORMAT                | нет         | text         |
 
@@ -85,8 +88,8 @@
 
 - `2xx` - `delivered`;
 - `4xx`, кроме `408`/`429` - `failed`;
-- `408`/`429`, `5xx`, сеть/таймаут - `pending` (повтор на следующем тике);
-- backoff, dead-letter и ручной retry пока не реализованы.
+- `408`/`429`, `5xx`, сеть/таймаут - `pending` с backoff и jitter; после `DELIVERY_MAX_ATTEMPTS` попыток - `dead`;
+- `POST /deliveries/{id}/retry` сбрасывает `attempts` и возвращает доставку в `pending`.
 
 ## Схема БД
 
@@ -122,6 +125,7 @@ golang-migrate, файлы в `migrations/`, применяются контей
 | POST  | /subscriptions   | 201 + `Location`, тело с `secret_key`; ошибки 400/413/415/500/503                        |
 | POST  | /events          | 202/200, `event_id` и `deliveries` (количество); ошибки 400/413/415/500/503               |
 | GET   | /deliveries/{id} | 200 с полями доставки; 400/404/500/503                                                    |
+| POST  | /deliveries/{id}/retry | 202 + доставка; 400/404/409/500/503                                                  |
 
 Ошибки - единый envelope `{"error":{"code":"...","message":"..."}}`. `fields` появляется только при ошибках валидации. Неизвестный маршрут → JSON 404, неподдерживаемый метод → JSON 405 + `Allow`.
 
@@ -237,6 +241,16 @@ golang-migrate, файлы в `migrations/`, применяются контей
 - `next_attempt_at` имеет смысл для `pending`, для терминальных статусов это не расписание.
 
 Ошибки: `400 validation_failed` для невалидного `id`, `404 not_found` для отсутствующей доставки, `500 internal_error`, `503 service_unavailable`.
+
+### POST /deliveries/{id}/retry
+
+Ручной retry доступен только для `failed`/`dead`. Сбрасывает `attempts` в 0,
+`last_status_code`/`last_error` очищает и возвращает доставку в `pending`
+с `next_attempt_at = now()`; worker подхватит ее на следующем тике.
+
+Ответ `202` + обновленная доставка. Ошибки: `400 validation_failed` для невалидного `id`,
+`404 not_found`, `409 delivery_not_retryable` для остальных статусов,
+`500 internal_error`, `503 service_unavailable`.
 
 ## Команды
 
