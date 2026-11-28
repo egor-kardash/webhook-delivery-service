@@ -12,10 +12,14 @@ import (
 )
 
 type stubDeliveryService struct {
-	calls  int
-	gotID  int64
-	result *domain.Delivery
-	err    error
+	calls       int
+	gotID       int64
+	result      *domain.Delivery
+	err         error
+	retryCalls  int
+	gotRetryID  int64
+	retryResult *domain.Delivery
+	retryErr    error
 }
 
 func (s *stubDeliveryService) GetDelivery(_ context.Context, id int64) (*domain.Delivery, error) {
@@ -23,6 +27,110 @@ func (s *stubDeliveryService) GetDelivery(_ context.Context, id int64) (*domain.
 	s.gotID = id
 
 	return s.result, s.err
+}
+
+func (s *stubDeliveryService) RetryDelivery(_ context.Context, id int64) (*domain.Delivery, error) {
+	s.retryCalls++
+	s.gotRetryID = id
+
+	return s.retryResult, s.retryErr
+}
+
+func TestDeliveryRetry(t *testing.T) {
+	t.Run("returns 202", func(t *testing.T) {
+		want := &domain.Delivery{
+			ID:     42,
+			Status: domain.DeliveryPending,
+		}
+		svc := &stubDeliveryService{retryResult: want}
+		handler := api.NewDeliveryHandler(svc)
+		router := newTestRouter(&stubPinger{}, handler)
+
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/deliveries/42/retry", nil)
+		rr := serve(t, router, req)
+
+		requireStatus(t, rr, http.StatusAccepted)
+
+		type deliveryResponse struct {
+			ID     int64                 `json:"id"`
+			Status domain.DeliveryStatus `json:"status"`
+		}
+		resp := decodeJSONBody[deliveryResponse](t, rr)
+		if resp.ID != want.ID {
+			t.Errorf("resp.ID = %d, want %d", resp.ID, want.ID)
+		}
+		if resp.Status != want.Status {
+			t.Errorf("resp.Status = %q, want %q", resp.Status, want.Status)
+		}
+
+		if svc.retryCalls != 1 {
+			t.Fatalf("svc.RetryDelivery calls = %d, want 1", svc.retryCalls)
+		}
+		if svc.gotRetryID != want.ID {
+			t.Errorf("svc.RetryDelivery id = %d, want %d", svc.gotRetryID, want.ID)
+		}
+	})
+
+	t.Run("returns 404", func(t *testing.T) {
+		svc := &stubDeliveryService{retryErr: domain.ErrDeliveryNotFound}
+		handler := api.NewDeliveryHandler(svc)
+		router := newTestRouter(&stubPinger{}, handler)
+
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/deliveries/42/retry", nil)
+		rr := serve(t, router, req)
+
+		requireError(t, rr, http.StatusNotFound, "not_found")
+
+		if svc.retryCalls != 1 {
+			t.Errorf("svc.RetryDelivery calls = %d, want 1", svc.retryCalls)
+		}
+	})
+
+	t.Run("returns 409", func(t *testing.T) {
+		svc := &stubDeliveryService{retryErr: domain.ErrDeliveryNotRetryable}
+		handler := api.NewDeliveryHandler(svc)
+		router := newTestRouter(&stubPinger{}, handler)
+
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/deliveries/42/retry", nil)
+		rr := serve(t, router, req)
+
+		requireError(t, rr, http.StatusConflict, "delivery_not_retryable")
+
+		if svc.retryCalls != 1 {
+			t.Errorf("svc.RetryDelivery calls = %d, want 1", svc.retryCalls)
+		}
+	})
+
+	t.Run("invalid id", func(t *testing.T) {
+		cases := []struct {
+			name string
+			path string
+		}{
+			{name: "not a number", path: "/deliveries/abc/retry"},
+			{name: "zero", path: "/deliveries/0/retry"},
+			{name: "negative", path: "/deliveries/-1/retry"},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				svc := &stubDeliveryService{}
+				handler := api.NewDeliveryHandler(svc)
+				router := newTestRouter(&stubPinger{}, handler)
+
+				req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, tc.path, nil)
+				rr := serve(t, router, req)
+
+				resp := requireError(t, rr, http.StatusBadRequest, "validation_failed")
+				if _, ok := resp.Error.Fields["id"]; !ok {
+					t.Errorf("expected fields.id in response, got %v", resp.Error.Fields)
+				}
+
+				if svc.retryCalls != 0 {
+					t.Errorf("svc.RetryDelivery calls = %d, want 0", svc.retryCalls)
+				}
+			})
+		}
+	})
 }
 
 func TestDeliveryGet(t *testing.T) {
