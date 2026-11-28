@@ -4,18 +4,26 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/egor-kardash/webhook-delivery-service/internal/domain"
 )
 
 func TestEvaluateAttempt(t *testing.T) {
-	job := domain.DeliveryJob{ID: 1}
+	svc := &DeliveryService{
+		policy: domain.RetryPolicy{
+			MaxAttempts: 5,
+			BaseDelay:   time.Second,
+			MaxDelay:    time.Minute,
+		},
+	}
 	permanentErr := fmt.Errorf("blocked target: %w", domain.ErrPermanentDelivery)
 
 	cases := []struct {
 		name           string
 		statusCode     int
 		sendErr        error
+		attempts       int
 		wantStatus     domain.DeliveryStatus
 		wantStatusCode *int
 		wantLastError  string
@@ -74,11 +82,19 @@ func TestEvaluateAttempt(t *testing.T) {
 			wantStatus:    domain.DeliveryPending,
 			wantLastError: "unexpected status code 600",
 		},
+		{
+			name:           "max attempts dead",
+			statusCode:     500,
+			attempts:       4,
+			wantStatus:     domain.DeliveryDead,
+			wantStatusCode: intPtr(500),
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := evaluateAttempt(job, tc.statusCode, tc.sendErr)
+			job := domain.DeliveryJob{ID: 1, Attempts: tc.attempts}
+			result := svc.evaluateAttempt(job, tc.statusCode, tc.sendErr)
 
 			if result.DeliveryID != job.ID {
 				t.Errorf("DeliveryID = %d, want %d", result.DeliveryID, job.ID)
@@ -88,6 +104,14 @@ func TestEvaluateAttempt(t *testing.T) {
 			}
 			if result.LastError != tc.wantLastError {
 				t.Errorf("LastError = %q, want %q", result.LastError, tc.wantLastError)
+			}
+
+			if tc.wantStatus == domain.DeliveryPending {
+				if result.RetryAfter <= 0 {
+					t.Errorf("RetryAfter = %s, want positive", result.RetryAfter)
+				}
+			} else if result.RetryAfter != 0 {
+				t.Errorf("RetryAfter = %s, want 0", result.RetryAfter)
 			}
 
 			if tc.wantStatusCode == nil {

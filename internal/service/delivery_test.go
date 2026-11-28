@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/egor-kardash/webhook-delivery-service/internal/domain"
 	"github.com/egor-kardash/webhook-delivery-service/internal/service"
@@ -21,6 +22,10 @@ type stubDeliveryStore struct {
 	records      []domain.AttemptResult
 	recordErrAt  int
 	recordErr    error
+	resetCalls   int
+	gotResetID   int64
+	resetResult  *domain.Delivery
+	resetErr     error
 }
 
 func (s *stubDeliveryStore) GetByID(_ context.Context, id int64) (*domain.Delivery, error) {
@@ -30,7 +35,7 @@ func (s *stubDeliveryStore) GetByID(_ context.Context, id int64) (*domain.Delive
 	return s.getResult, s.getErr
 }
 
-func (s *stubDeliveryStore) ClaimOneDue(context.Context) (*domain.DeliveryJob, error) {
+func (s *stubDeliveryStore) ClaimOneDue(_ context.Context) (*domain.DeliveryJob, error) {
 	s.claimCalls++
 	if len(s.jobs) == 0 {
 		return nil, nil
@@ -42,10 +47,17 @@ func (s *stubDeliveryStore) ClaimOneDue(context.Context) (*domain.DeliveryJob, e
 	return job, nil
 }
 
-func (s *stubDeliveryStore) ReleaseExpiredLeases(context.Context) (int, error) {
+func (s *stubDeliveryStore) ReleaseExpiredLeases(_ context.Context, _ int) (int, error) {
 	s.releaseCalls++
 
 	return 0, nil
+}
+
+func (s *stubDeliveryStore) ResetForRetry(_ context.Context, id int64) (*domain.Delivery, error) {
+	s.resetCalls++
+	s.gotResetID = id
+
+	return s.resetResult, s.resetErr
 }
 
 func (s *stubDeliveryStore) RecordAttempt(_ context.Context, result domain.AttemptResult) error {
@@ -67,6 +79,25 @@ func (s *stubSender) Send(ctx context.Context, job domain.DeliveryJob) (int, err
 	return s.send(ctx, job)
 }
 
+func newTestDeliveryService(t *testing.T, store service.DeliveryStore, sender service.Sender) *service.DeliveryService {
+	t.Helper()
+
+	svc, err := service.NewDeliveryService(
+		store,
+		sender,
+		domain.RetryPolicy{
+			MaxAttempts: 5,
+			BaseDelay:   time.Second,
+			MaxDelay:    time.Minute,
+		},
+	)
+	if err != nil {
+		t.Fatalf("service.NewDeliveryService: %v", err)
+	}
+
+	return svc
+}
+
 func deliveryJob(id int64) *domain.DeliveryJob {
 	return &domain.DeliveryJob{
 		ID:        id,
@@ -86,14 +117,14 @@ func TestDeliveryServiceGetDelivery(t *testing.T) {
 			Status:         domain.DeliveryPending,
 		}
 		store := &stubDeliveryStore{getResult: want}
-		svc := service.NewDeliveryService(store, &stubSender{})
+		svc := newTestDeliveryService(t, store, &stubSender{})
 
 		got, err := svc.GetDelivery(t.Context(), want.ID)
 		if err != nil {
 			t.Fatalf("service.GetDelivery: %v", err)
 		}
 		if got != want {
-			t.Error("GetDelivery must return the delivery from the store")
+			t.Error("service.GetDelivery must return the delivery from the store")
 		}
 		if store.getCalls != 1 {
 			t.Errorf("store.GetByID calls = %d, want 1", store.getCalls)
@@ -105,7 +136,7 @@ func TestDeliveryServiceGetDelivery(t *testing.T) {
 
 	t.Run("not found", func(t *testing.T) {
 		store := &stubDeliveryStore{getErr: domain.ErrDeliveryNotFound}
-		svc := service.NewDeliveryService(store, &stubSender{})
+		svc := newTestDeliveryService(t, store, &stubSender{})
 
 		_, err := svc.GetDelivery(t.Context(), 42)
 		if !errors.Is(err, domain.ErrDeliveryNotFound) {
@@ -116,11 +147,53 @@ func TestDeliveryServiceGetDelivery(t *testing.T) {
 	t.Run("store error", func(t *testing.T) {
 		storeErr := errors.New("store failure")
 		store := &stubDeliveryStore{getErr: storeErr}
-		svc := service.NewDeliveryService(store, &stubSender{})
+		svc := newTestDeliveryService(t, store, &stubSender{})
 
 		_, err := svc.GetDelivery(t.Context(), 42)
 		if !errors.Is(err, storeErr) {
 			t.Errorf("service.GetDelivery error = %v, want %v", err, storeErr)
+		}
+	})
+}
+
+func TestDeliveryServiceRetryDelivery(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		want := &domain.Delivery{ID: 42, Status: domain.DeliveryPending}
+		store := &stubDeliveryStore{resetResult: want}
+		svc := newTestDeliveryService(t, store, &stubSender{})
+
+		got, err := svc.RetryDelivery(t.Context(), want.ID)
+		if err != nil {
+			t.Fatalf("service.RetryDelivery: %v", err)
+		}
+		if got != want {
+			t.Error("service.RetryDelivery must return the delivery from the store")
+		}
+		if store.resetCalls != 1 {
+			t.Errorf("store.ResetForRetry calls = %d, want 1", store.resetCalls)
+		}
+		if store.gotResetID != want.ID {
+			t.Errorf("store.ResetForRetry id = %d, want %d", store.gotResetID, want.ID)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		store := &stubDeliveryStore{resetErr: domain.ErrDeliveryNotFound}
+		svc := newTestDeliveryService(t, store, &stubSender{})
+
+		_, err := svc.RetryDelivery(t.Context(), 42)
+		if !errors.Is(err, domain.ErrDeliveryNotFound) {
+			t.Errorf("service.RetryDelivery error = %v, want %v", err, domain.ErrDeliveryNotFound)
+		}
+	})
+
+	t.Run("not retryable", func(t *testing.T) {
+		store := &stubDeliveryStore{resetErr: domain.ErrDeliveryNotRetryable}
+		svc := newTestDeliveryService(t, store, &stubSender{})
+
+		_, err := svc.RetryDelivery(t.Context(), 42)
+		if !errors.Is(err, domain.ErrDeliveryNotRetryable) {
+			t.Errorf("service.RetryDelivery error = %v, want %v", err, domain.ErrDeliveryNotRetryable)
 		}
 	})
 }
@@ -135,7 +208,7 @@ func TestProcessDue(t *testing.T) {
 			sent++
 			return code, nil
 		}}
-		svc := service.NewDeliveryService(store, sender)
+		svc := newTestDeliveryService(t, store, sender)
 
 		if err := svc.ProcessDue(t.Context(), 5); err != nil {
 			t.Fatalf("service.ProcessDue: %v", err)
@@ -159,6 +232,12 @@ func TestProcessDue(t *testing.T) {
 		if store.records[1].Status != domain.DeliveryPending {
 			t.Errorf("second status = %q, want %q", store.records[1].Status, domain.DeliveryPending)
 		}
+		if store.records[0].RetryAfter != 0 {
+			t.Errorf("delivered attempt RetryAfter = %s, want 0", store.records[0].RetryAfter)
+		}
+		if store.records[1].RetryAfter <= 0 {
+			t.Errorf("pending attempt RetryAfter = %s, want positive", store.records[1].RetryAfter)
+		}
 	})
 
 	t.Run("sender error does not abort the batch", func(t *testing.T) {
@@ -171,7 +250,7 @@ func TestProcessDue(t *testing.T) {
 			}
 			return 204, nil
 		}}
-		svc := service.NewDeliveryService(store, sender)
+		svc := newTestDeliveryService(t, store, sender)
 
 		if err := svc.ProcessDue(t.Context(), 5); err != nil {
 			t.Fatalf("service.ProcessDue: %v", err)
@@ -201,7 +280,7 @@ func TestProcessDue(t *testing.T) {
 		sender := &stubSender{send: func(context.Context, domain.DeliveryJob) (int, error) {
 			return 200, nil
 		}}
-		svc := service.NewDeliveryService(store, sender)
+		svc := newTestDeliveryService(t, store, sender)
 
 		err := svc.ProcessDue(t.Context(), 5)
 		if !errors.Is(err, recordErr) {
@@ -219,7 +298,7 @@ func TestProcessDue(t *testing.T) {
 		sender := &stubSender{send: func(context.Context, domain.DeliveryJob) (int, error) {
 			return 200, nil
 		}}
-		svc := service.NewDeliveryService(store, sender)
+		svc := newTestDeliveryService(t, store, sender)
 
 		if err := svc.ProcessDue(t.Context(), 2); err != nil {
 			t.Fatalf("service.ProcessDue: %v", err)

@@ -50,6 +50,7 @@ type DeliveryJob struct {
 type AttemptResult struct {
 	DeliveryID     int64
 	Status         DeliveryStatus
+	RetryAfter     time.Duration
 	LastStatusCode *int
 	LastError      string
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/egor-kardash/webhook-delivery-service/internal/api"
 	"github.com/egor-kardash/webhook-delivery-service/internal/client"
 	"github.com/egor-kardash/webhook-delivery-service/internal/config"
+	"github.com/egor-kardash/webhook-delivery-service/internal/domain"
 	"github.com/egor-kardash/webhook-delivery-service/internal/service"
 	"github.com/egor-kardash/webhook-delivery-service/internal/store"
 	"github.com/egor-kardash/webhook-delivery-service/internal/worker"
@@ -55,7 +56,19 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*App, error
 		return nil, fmt.Errorf("init delivery store: %w", err)
 	}
 
-	deliveryService := service.NewDeliveryService(deliveryStore, webhookClient)
+	deliveryService, err := service.NewDeliveryService(
+		deliveryStore,
+		webhookClient,
+		domain.RetryPolicy{
+			MaxAttempts: cfg.Delivery.Retry.MaxAttempts,
+			BaseDelay:   cfg.Delivery.Retry.BaseDelay,
+			MaxDelay:    cfg.Delivery.Retry.MaxDelay,
+		},
+	)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("init delivery service: %w", err)
+	}
 
 	deliveryHandler := api.NewDeliveryHandler(deliveryService)
 

@@ -110,17 +110,27 @@ func (s *DeliveryStore) ClaimOneDue(ctx context.Context) (*domain.DeliveryJob, e
 	return &job, nil
 }
 
-func (s *DeliveryStore) ReleaseExpiredLeases(ctx context.Context) (int, error) {
+func (s *DeliveryStore) ReleaseExpiredLeases(ctx context.Context, maxAttempts int) (int, error) {
+	if maxAttempts < 1 {
+		return 0, errors.New("max attempts must be at least 1")
+	}
+
 	const query = `
 		UPDATE webhook.deliveries
-		SET status = 'pending',
+		SET status = CASE
+				WHEN attempts + 1 >= $1 THEN 'dead'
+				ELSE 'pending'
+			END,
+			attempts = attempts + 1,
 			locked_until = NULL,
 			next_attempt_at = now(),
+			last_status_code = NULL,
+			last_error = 'lease expired',
 			updated_at = now()
 		WHERE status = 'in_progress'
 			AND locked_until <= now()`
 
-	tag, err := s.pool.Exec(ctx, query)
+	tag, err := s.pool.Exec(ctx, query, maxAttempts)
 	if err != nil {
 		return 0, fmt.Errorf("release expired delivery leases: %w", err)
 	}
@@ -135,15 +145,25 @@ func (s *DeliveryStore) RecordAttempt(ctx context.Context, result domain.Attempt
 	if !result.Status.IsAttemptOutcome() {
 		return fmt.Errorf("invalid attempt status %q", result.Status)
 	}
+	if result.Status == domain.DeliveryPending && result.RetryAfter <= 0 {
+		return errors.New("pending attempt must have positive retry after")
+	}
+	if result.Status != domain.DeliveryPending && result.RetryAfter != 0 {
+		return errors.New("terminal attempt must not have retry after")
+	}
 
 	const query = `
 		UPDATE webhook.deliveries
 		SET status = $2,
 			attempts = attempts + 1,
 			locked_until = NULL,
-			next_attempt_at = now(),
-			last_status_code = $3,
-			last_error = NULLIF($4, ''),
+			next_attempt_at = CASE
+				WHEN $2 = 'pending'
+					THEN now() + ($3::double precision * interval '1 microsecond')
+				ELSE now()
+			END,
+			last_status_code = $4,
+			last_error = NULLIF($5, ''),
 			updated_at = now()
 		WHERE id = $1
 			AND status = 'in_progress'
@@ -159,6 +179,7 @@ func (s *DeliveryStore) RecordAttempt(ctx context.Context, result domain.Attempt
 		query,
 		result.DeliveryID,
 		string(result.Status),
+		result.RetryAfter.Microseconds(),
 		lastStatusCode,
 		result.LastError,
 	)
@@ -170,4 +191,72 @@ func (s *DeliveryStore) RecordAttempt(ctx context.Context, result domain.Attempt
 	}
 
 	return nil
+}
+
+func (s *DeliveryStore) ResetForRetry(ctx context.Context, id int64) (*domain.Delivery, error) {
+	if id <= 0 {
+		return nil, errors.New("delivery id must be positive")
+	}
+
+	const lockDeliveryQuery = `
+		SELECT status
+		FROM webhook.deliveries
+		WHERE id = $1
+		FOR UPDATE`
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var status domain.DeliveryStatus
+	err = tx.QueryRow(ctx, lockDeliveryQuery, id).Scan(&status)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("reset delivery: %w", domain.ErrDeliveryNotFound)
+		}
+		return nil, fmt.Errorf("lock delivery: %w", err)
+	}
+
+	if status != domain.DeliveryFailed && status != domain.DeliveryDead {
+		return nil, fmt.Errorf("reset delivery: %w", domain.ErrDeliveryNotRetryable)
+	}
+
+	const query = `
+		UPDATE webhook.deliveries
+		SET status = 'pending',
+			attempts = 0,
+			locked_until = NULL,
+			next_attempt_at = now(),
+			last_status_code = NULL,
+			last_error = NULL,
+			updated_at = now()
+		WHERE id = $1
+		RETURNING id, event_id, subscription_id, status, attempts,
+				  next_attempt_at, COALESCE(last_status_code, 0),
+				  COALESCE(last_error, ''), created_at, updated_at`
+
+	var delivery domain.Delivery
+	err = tx.QueryRow(ctx, query, id).Scan(
+		&delivery.ID,
+		&delivery.EventID,
+		&delivery.SubscriptionID,
+		&delivery.Status,
+		&delivery.Attempts,
+		&delivery.NextAttemptAt,
+		&delivery.LastStatusCode,
+		&delivery.LastError,
+		&delivery.CreatedAt,
+		&delivery.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reset delivery: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+
+	return &delivery, nil
 }

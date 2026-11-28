@@ -6,9 +6,10 @@ import (
 )
 
 var (
-	ErrDeliveryNotFound  = errors.New("delivery not found")
-	ErrLeaseLost         = errors.New("delivery lease lost")
-	ErrPermanentDelivery = errors.New("permanent delivery failure")
+	ErrDeliveryNotFound     = errors.New("delivery not found")
+	ErrLeaseLost            = errors.New("delivery lease lost")
+	ErrPermanentDelivery    = errors.New("permanent delivery failure")
+	ErrDeliveryNotRetryable = errors.New("delivery not retryable")
 )
 
 type ValidationError struct {
