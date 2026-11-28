@@ -28,7 +28,7 @@ type stubPinger struct {
 	calls int
 }
 
-func (p *stubPinger) Ping(ctx context.Context) error {
+func (p *stubPinger) Ping(_ context.Context) error {
 	p.calls++
 
 	return p.err

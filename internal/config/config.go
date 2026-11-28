@@ -114,6 +114,13 @@ type Delivery struct {
 	MaxPerTick   int
 	HTTPTimeout  time.Duration
 	Lease        time.Duration
+	Retry        Retry
+}
+
+type Retry struct {
+	MaxAttempts int
+	BaseDelay   time.Duration
+	MaxDelay    time.Duration
 }
 
 func (d Delivery) Validate() error {
@@ -131,6 +138,18 @@ func (d Delivery) Validate() error {
 	}
 	if d.Lease <= d.HTTPTimeout {
 		return errors.New("delivery.lease: must be greater than delivery.http_timeout")
+	}
+	if d.Retry.MaxAttempts < 1 {
+		return errors.New("delivery.retry.max_attempts: must be at least 1")
+	}
+	if d.Retry.BaseDelay <= 0 {
+		return errors.New("delivery.retry.base_delay: must be greater than 0")
+	}
+	if d.Retry.MaxDelay <= 0 {
+		return errors.New("delivery.retry.max_delay: must be greater than 0")
+	}
+	if d.Retry.MaxDelay < d.Retry.BaseDelay {
+		return errors.New("delivery.retry.max_delay: must be greater than or equal to base_delay")
 	}
 
 	return nil
@@ -180,6 +199,11 @@ func Load() (*Config, error) {
 			MaxPerTick:   envInt("DELIVERY_MAX_PER_TICK", 5, &errs),
 			HTTPTimeout:  envDuration("DELIVERY_HTTP_TIMEOUT", 5*time.Second, &errs),
 			Lease:        envDuration("DELIVERY_LEASE", 30*time.Second, &errs),
+			Retry: Retry{
+				MaxAttempts: envInt("DELIVERY_MAX_ATTEMPTS", 5, &errs),
+				BaseDelay:   envDuration("DELIVERY_RETRY_BASE_DELAY", time.Second, &errs),
+				MaxDelay:    envDuration("DELIVERY_RETRY_MAX_DELAY", time.Minute, &errs),
+			},
 		},
 		Log: Log{
 			Level:  envString("LOG_LEVEL", "info"),

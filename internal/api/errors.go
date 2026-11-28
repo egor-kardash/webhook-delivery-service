@@ -19,6 +19,7 @@ const (
 	codeUnsupportedMediaType = "unsupported_media_type"
 	codeInvalidJSON          = "invalid_json"
 	codeDatabaseUnavailable  = "database_unavailable"
+	codeDeliveryNotRetryable = "delivery_not_retryable"
 )
 
 type errorBody struct {
@@ -39,6 +40,8 @@ func writeServiceError(ctx context.Context, w http.ResponseWriter, err error) {
 		writeValidationError(ctx, w, valErr.Fields)
 	case errors.Is(err, domain.ErrDeliveryNotFound):
 		WriteError(ctx, w, http.StatusNotFound, codeNotFound, "delivery not found")
+	case errors.Is(err, domain.ErrDeliveryNotRetryable):
+		WriteError(ctx, w, http.StatusConflict, codeDeliveryNotRetryable, "delivery is not retryable")
 	case errors.Is(err, context.Canceled):
 		LoggerFrom(ctx).Debug("request canceled", "error", err)
 		WriteError(ctx, w, http.StatusServiceUnavailable, codeServiceUnavailable, "request canceled")

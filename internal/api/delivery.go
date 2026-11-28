@@ -11,6 +11,7 @@ import (
 
 type DeliveryService interface {
 	GetDelivery(ctx context.Context, id int64) (*domain.Delivery, error)
+	RetryDelivery(ctx context.Context, id int64) (*domain.Delivery, error)
 }
 
 type DeliveryHandler struct {
@@ -23,6 +24,7 @@ func NewDeliveryHandler(svc DeliveryService) *DeliveryHandler {
 
 func (h *DeliveryHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /deliveries/{id}", h.GetDelivery)
+	mux.HandleFunc("POST /deliveries/{id}/retry", h.RetryDelivery)
 }
 
 type deliveryResponse struct {
@@ -36,6 +38,21 @@ type deliveryResponse struct {
 	LastError      string                `json:"last_error"`
 	CreatedAt      time.Time             `json:"created_at"`
 	UpdatedAt      time.Time             `json:"updated_at"`
+}
+
+func toDeliveryResponse(delivery domain.Delivery) deliveryResponse {
+	return deliveryResponse{
+		ID:             delivery.ID,
+		EventID:        delivery.EventID,
+		SubscriptionID: delivery.SubscriptionID,
+		Status:         delivery.Status,
+		Attempts:       delivery.Attempts,
+		NextAttemptAt:  delivery.NextAttemptAt,
+		LastStatusCode: delivery.LastStatusCode,
+		LastError:      delivery.LastError,
+		CreatedAt:      delivery.CreatedAt,
+		UpdatedAt:      delivery.UpdatedAt,
+	}
 }
 
 func (h *DeliveryHandler) GetDelivery(w http.ResponseWriter, r *http.Request) {
@@ -54,18 +71,26 @@ func (h *DeliveryHandler) GetDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(ctx, w, http.StatusOK, deliveryResponse{
-		ID:             delivery.ID,
-		EventID:        delivery.EventID,
-		SubscriptionID: delivery.SubscriptionID,
-		Status:         delivery.Status,
-		Attempts:       delivery.Attempts,
-		NextAttemptAt:  delivery.NextAttemptAt,
-		LastStatusCode: delivery.LastStatusCode,
-		LastError:      delivery.LastError,
-		CreatedAt:      delivery.CreatedAt,
-		UpdatedAt:      delivery.UpdatedAt,
-	})
+	WriteJSON(ctx, w, http.StatusOK, toDeliveryResponse(*delivery))
+}
+
+func (h *DeliveryHandler) RetryDelivery(w http.ResponseWriter, r *http.Request) {
+	id, err := parseDeliveryID(r)
+	if err != nil {
+		writeServiceError(r.Context(), w, err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), dbTimeout)
+	defer cancel()
+
+	delivery, err := h.svc.RetryDelivery(ctx, id)
+	if err != nil {
+		writeServiceError(ctx, w, err)
+		return
+	}
+
+	WriteJSON(ctx, w, http.StatusAccepted, toDeliveryResponse(*delivery))
 }
 
 func parseDeliveryID(r *http.Request) (int64, error) {

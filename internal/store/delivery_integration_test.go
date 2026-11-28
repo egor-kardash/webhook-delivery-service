@@ -135,7 +135,7 @@ func TestDeliveryStoreClaimOneDue(t *testing.T) {
 
 		for err := range errs {
 			if err != nil {
-				t.Fatalf("ClaimOneDue: %v", err)
+				t.Fatalf("store.ClaimOneDue: %v", err)
 			}
 		}
 
@@ -147,6 +147,56 @@ func TestDeliveryStoreClaimOneDue(t *testing.T) {
 		}
 		if claimed != 1 {
 			t.Errorf("claimed = %d, want 1", claimed)
+		}
+	})
+
+	t.Run("does not claim a future delivery", func(t *testing.T) {
+		pool := testdb.New(t)
+		deliveryID := seedPendingDelivery(t, pool)
+		deliveryStore, err := store.NewDeliveryStore(pool, time.Minute)
+		if err != nil {
+			t.Fatalf("new delivery store: %v", err)
+		}
+
+		if _, err := pool.Exec(
+			t.Context(),
+			`UPDATE webhook.deliveries SET next_attempt_at = now() + interval '1 hour' WHERE id = $1`,
+			deliveryID,
+		); err != nil {
+			t.Fatalf("move next_attempt_at: %v", err)
+		}
+
+		job, err := deliveryStore.ClaimOneDue(t.Context())
+		if err != nil {
+			t.Fatalf("store.ClaimOneDue: %v", err)
+		}
+		if job != nil {
+			t.Errorf("job = %+v, want nil for future delivery", job)
+		}
+	})
+
+	t.Run("does not claim a dead delivery", func(t *testing.T) {
+		pool := testdb.New(t)
+		deliveryID := seedPendingDelivery(t, pool)
+		deliveryStore, err := store.NewDeliveryStore(pool, time.Minute)
+		if err != nil {
+			t.Fatalf("new delivery store: %v", err)
+		}
+
+		if _, err := pool.Exec(
+			t.Context(),
+			`UPDATE webhook.deliveries SET status = 'dead', locked_until = NULL WHERE id = $1`,
+			deliveryID,
+		); err != nil {
+			t.Fatalf("mark dead: %v", err)
+		}
+
+		job, err := deliveryStore.ClaimOneDue(t.Context())
+		if err != nil {
+			t.Fatalf("store.ClaimOneDue: %v", err)
+		}
+		if job != nil {
+			t.Errorf("job = %+v, want nil for dead delivery", job)
 		}
 	})
 }
@@ -172,6 +222,7 @@ func TestDeliveryStoreRecordAttempt(t *testing.T) {
 		err = deliveryStore.RecordAttempt(t.Context(), domain.AttemptResult{
 			DeliveryID:     job.ID,
 			Status:         domain.DeliveryPending,
+			RetryAfter:     time.Minute,
 			LastStatusCode: &code,
 			LastError:      "server error",
 		})
@@ -204,7 +255,10 @@ func TestDeliveryStoreRecordAttempt(t *testing.T) {
 			t.Errorf("locked_until = %v, want nil", locked)
 		}
 		if nextAttemptAt.IsZero() {
-			t.Error("next_attempt_at is zero")
+			t.Error("next_attempt_at is zero, want future time")
+		}
+		if !nextAttemptAt.After(time.Now()) {
+			t.Errorf("next_attempt_at = %v, want after now", nextAttemptAt)
 		}
 		if lastCode == nil || *lastCode != code {
 			t.Errorf("last_status_code = %v, want %d", lastCode, code)
@@ -310,47 +364,216 @@ func TestDeliveryStoreGetByID(t *testing.T) {
 }
 
 func TestDeliveryStoreReleaseExpiredLeases(t *testing.T) {
-	pool := testdb.New(t)
-	deliveryID := seedPendingDelivery(t, pool)
-	deliveryStore, err := store.NewDeliveryStore(pool, time.Minute)
-	if err != nil {
-		t.Fatalf("new delivery store: %v", err)
-	}
+	t.Run("returns pending and increments attempts", func(t *testing.T) {
+		pool := testdb.New(t)
+		deliveryID := seedPendingDelivery(t, pool)
+		deliveryStore, err := store.NewDeliveryStore(pool, time.Minute)
+		if err != nil {
+			t.Fatalf("new delivery store: %v", err)
+		}
 
-	if _, err := deliveryStore.ClaimOneDue(t.Context()); err != nil {
-		t.Fatalf("store.ClaimOneDue: %v", err)
-	}
-	if _, err := pool.Exec(
-		t.Context(),
-		`UPDATE webhook.deliveries SET locked_until = now() - interval '1 second' WHERE id = $1`,
-		deliveryID,
-	); err != nil {
-		t.Fatalf("expire lease: %v", err)
-	}
+		if _, err := deliveryStore.ClaimOneDue(t.Context()); err != nil {
+			t.Fatalf("store.ClaimOneDue: %v", err)
+		}
+		if _, err := pool.Exec(
+			t.Context(),
+			`UPDATE webhook.deliveries SET locked_until = now() - interval '1 second' WHERE id = $1`,
+			deliveryID,
+		); err != nil {
+			t.Fatalf("expire lease: %v", err)
+		}
 
-	released, err := deliveryStore.ReleaseExpiredLeases(t.Context())
-	if err != nil {
-		t.Fatalf("store.ReleaseExpiredLeases: %v", err)
-	}
-	if released != 1 {
-		t.Errorf("released = %d, want 1", released)
-	}
+		released, err := deliveryStore.ReleaseExpiredLeases(t.Context(), 5)
+		if err != nil {
+			t.Fatalf("store.ReleaseExpiredLeases: %v", err)
+		}
+		if released != 1 {
+			t.Errorf("released = %d, want 1", released)
+		}
 
-	var (
-		status string
-		locked *time.Time
-	)
-	if err := pool.QueryRow(
-		t.Context(),
-		`SELECT status, locked_until FROM webhook.deliveries WHERE id = $1`,
-		deliveryID,
-	).Scan(&status, &locked); err != nil {
-		t.Fatalf("select delivery: %v", err)
-	}
-	if status != "pending" {
-		t.Errorf("status = %q, want %q", status, "pending")
-	}
-	if locked != nil {
-		t.Errorf("locked_until = %v, want nil", locked)
-	}
+		var (
+			status    string
+			attempts  int
+			locked    *time.Time
+			lastError *string
+		)
+		if err := pool.QueryRow(
+			t.Context(),
+			`SELECT status, attempts, locked_until, last_error
+			 FROM webhook.deliveries WHERE id = $1`,
+			deliveryID,
+		).Scan(&status, &attempts, &locked, &lastError); err != nil {
+			t.Fatalf("select delivery: %v", err)
+		}
+		if status != "pending" {
+			t.Errorf("status = %q, want %q", status, "pending")
+		}
+		if attempts != 1 {
+			t.Errorf("attempts = %d, want 1", attempts)
+		}
+		if locked != nil {
+			t.Errorf("locked_until = %v, want nil", locked)
+		}
+		if lastError == nil || *lastError != "lease expired" {
+			t.Errorf("last_error = %v, want %q", lastError, "lease expired")
+		}
+	})
+
+	t.Run("marks dead when max attempts reached", func(t *testing.T) {
+		pool := testdb.New(t)
+		deliveryID := seedPendingDelivery(t, pool)
+		deliveryStore, err := store.NewDeliveryStore(pool, time.Minute)
+		if err != nil {
+			t.Fatalf("new delivery store: %v", err)
+		}
+
+		if _, err := deliveryStore.ClaimOneDue(t.Context()); err != nil {
+			t.Fatalf("store.ClaimOneDue: %v", err)
+		}
+		if _, err := pool.Exec(
+			t.Context(),
+			`UPDATE webhook.deliveries SET locked_until = now() - interval '1 second' WHERE id = $1`,
+			deliveryID,
+		); err != nil {
+			t.Fatalf("expire lease: %v", err)
+		}
+
+		released, err := deliveryStore.ReleaseExpiredLeases(t.Context(), 1)
+		if err != nil {
+			t.Fatalf("store.ReleaseExpiredLeases: %v", err)
+		}
+		if released != 1 {
+			t.Errorf("released = %d, want 1", released)
+		}
+
+		var (
+			status   string
+			attempts int
+		)
+		if err := pool.QueryRow(
+			t.Context(),
+			`SELECT status, attempts FROM webhook.deliveries WHERE id = $1`,
+			deliveryID,
+		).Scan(&status, &attempts); err != nil {
+			t.Fatalf("select delivery: %v", err)
+		}
+		if status != "dead" {
+			t.Errorf("status = %q, want %q", status, "dead")
+		}
+		if attempts != 1 {
+			t.Errorf("attempts = %d, want 1", attempts)
+		}
+	})
+}
+
+func TestDeliveryStoreResetForRetry(t *testing.T) {
+	t.Run("failed delivery returns to pending", func(t *testing.T) {
+		pool := testdb.New(t)
+		deliveryID := seedPendingDelivery(t, pool)
+		deliveryStore, err := store.NewDeliveryStore(pool, time.Minute)
+		if err != nil {
+			t.Fatalf("new delivery store: %v", err)
+		}
+
+		job, err := deliveryStore.ClaimOneDue(t.Context())
+		if err != nil {
+			t.Fatalf("store.ClaimOneDue: %v", err)
+		}
+		if job == nil {
+			t.Fatal("store.ClaimOneDue returned nil, want job")
+		}
+
+		code := 400
+		if err := deliveryStore.RecordAttempt(t.Context(), domain.AttemptResult{
+			DeliveryID:     deliveryID,
+			Status:         domain.DeliveryFailed,
+			LastStatusCode: &code,
+			LastError:      "bad request",
+		}); err != nil {
+			t.Fatalf("store.RecordAttempt: %v", err)
+		}
+
+		delivery, err := deliveryStore.ResetForRetry(t.Context(), deliveryID)
+		if err != nil {
+			t.Fatalf("store.ResetForRetry: %v", err)
+		}
+		if delivery.Status != domain.DeliveryPending {
+			t.Errorf("status = %q, want %q", delivery.Status, domain.DeliveryPending)
+		}
+		if delivery.Attempts != 0 {
+			t.Errorf("attempts = %d, want 0", delivery.Attempts)
+		}
+		if delivery.LastStatusCode != 0 {
+			t.Errorf("last_status_code = %d, want 0", delivery.LastStatusCode)
+		}
+		if delivery.LastError != "" {
+			t.Errorf("last_error = %q, want empty", delivery.LastError)
+		}
+		if delivery.NextAttemptAt.IsZero() {
+			t.Error("next_attempt_at is zero, want non-zero")
+		}
+	})
+
+	t.Run("dead delivery returns to pending", func(t *testing.T) {
+		pool := testdb.New(t)
+		deliveryID := seedPendingDelivery(t, pool)
+		deliveryStore, err := store.NewDeliveryStore(pool, time.Minute)
+		if err != nil {
+			t.Fatalf("new delivery store: %v", err)
+		}
+
+		job, err := deliveryStore.ClaimOneDue(t.Context())
+		if err != nil {
+			t.Fatalf("store.ClaimOneDue: %v", err)
+		}
+		if job == nil {
+			t.Fatal("store.ClaimOneDue returned nil, want job")
+		}
+
+		if err := deliveryStore.RecordAttempt(t.Context(), domain.AttemptResult{
+			DeliveryID: deliveryID,
+			Status:     domain.DeliveryDead,
+		}); err != nil {
+			t.Fatalf("store.RecordAttempt: %v", err)
+		}
+
+		delivery, err := deliveryStore.ResetForRetry(t.Context(), deliveryID)
+		if err != nil {
+			t.Fatalf("store.ResetForRetry: %v", err)
+		}
+		if delivery.Status != domain.DeliveryPending {
+			t.Errorf("status = %q, want %q", delivery.Status, domain.DeliveryPending)
+		}
+	})
+
+	t.Run("not retryable", func(t *testing.T) {
+		pool := testdb.New(t)
+		deliveryID := seedPendingDelivery(t, pool)
+		deliveryStore, err := store.NewDeliveryStore(pool, time.Minute)
+		if err != nil {
+			t.Fatalf("new delivery store: %v", err)
+		}
+
+		if _, err := deliveryStore.ClaimOneDue(t.Context()); err != nil {
+			t.Fatalf("store.ClaimOneDue: %v", err)
+		}
+
+		_, err = deliveryStore.ResetForRetry(t.Context(), deliveryID)
+		if !errors.Is(err, domain.ErrDeliveryNotRetryable) {
+			t.Errorf("store.ResetForRetry error = %v, want %v", err, domain.ErrDeliveryNotRetryable)
+		}
+	})
+
+	t.Run("not found", func(t *testing.T) {
+		pool := testdb.New(t)
+		deliveryStore, err := store.NewDeliveryStore(pool, time.Minute)
+		if err != nil {
+			t.Fatalf("new delivery store: %v", err)
+		}
+
+		_, err = deliveryStore.ResetForRetry(t.Context(), 999999)
+		if !errors.Is(err, domain.ErrDeliveryNotFound) {
+			t.Errorf("store.ResetForRetry error = %v, want %v", err, domain.ErrDeliveryNotFound)
+		}
+	})
 }

@@ -15,7 +15,7 @@ import (
 
 type panicPinger struct{}
 
-func (panicPinger) Ping(context.Context) error {
+func (panicPinger) Ping(_ context.Context) error {
 	panic("boom")
 }
 
